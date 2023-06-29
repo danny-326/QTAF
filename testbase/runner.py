@@ -386,7 +386,9 @@ class BaseTestRunner(object):
                 it.share_data_mgr = self._share_data_mgr
 
         runner = getattr(test, "case_runner", TestCaseRunner())
-        result = runner.run(test, self.__report.get_testresult_factory())
+        result_factory = self.__report.get_testresult_factory()
+        self.__report.begin_testcase(test)
+        result = runner.run(test, result_factory)
         if isinstance(result, TestResultCollection):
             self._log_collection_result(result)
         else:

@@ -14,7 +14,6 @@
 #
 """测试报告
 """
-
 import sys
 import socket
 import os
@@ -47,6 +46,20 @@ report_usage = (
     'runtest <test ...> --report-type <report-type> [--report-args "<report-args>"]'
 )
 
+class TestcaseRunStatus(object):
+    """测试用例状态
+
+    :attention: 此类将会被移除，请使用TestCase.EnumStatus
+    """
+
+    Pending, Running, Passed, RunFailure, LoadFailure, Skipped = (
+        "Pending",
+        "Running",
+        "Passed",
+        "RunFailure",
+        "LoadFailure",
+        "Skipped"
+    )
 
 class ITestReport(object):
     """测试报告接口"""
@@ -61,6 +74,9 @@ class ITestReport(object):
         :param passed: 测试是否通过
         :type passed: boolean
         """
+        pass
+
+    def begin_testcase(self, testcase):
         pass
 
     def log_test_result(self, testcase, testresult):
@@ -609,7 +625,7 @@ class XMLTestResultFactory(ITestResultFactory):
         """
         return testresult.XmlResult(testcase)
 
-
+# TODO: 调整和json一样
 class XMLTestReport(TestReportBase):
     """XML形式的测试报告"""
 
@@ -793,18 +809,12 @@ class JSONTestReportBase(TestReportBase):
         """
         super(JSONTestReportBase, self).__init__()
         self._logs = []
-        self._filtered_tests = []
-        self._load_errors = []
-        self._passed_tests = {}
-        self._failed_tests = {}
+        self._tests = {}
         self._data = {
             "version": "1.0",
             "summary": {"tool": "QTA", "title": title, "environment": {}},
             "logs": self._logs,
-            "filtered_tests": self._filtered_tests,
-            "load_errors": self._load_errors,
-            "passed_tests": self._passed_tests,
-            "failed_tests": self._failed_tests,
+            "tests": self._tests,
         }
         self._testcase_names = set()
         self._testcase_total_run = 0
@@ -836,20 +846,43 @@ class JSONTestReportBase(TestReportBase):
         self._data["summary"]["succeed"] = self.is_passed()
         self._data["summary"]["end_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    def get_default_test_info(self, test_case, test_result):
-        test_result_data = test_result.get_data()
+    def get_load_error_test_info(self, error):
+        test_info = {
+            "description": "",
+            "owner": "",
+            "priority": "",
+            "status": "",
+            "run_status": TestcaseRunStatus.LoadFailure,
+            "timeout": "",
+            "skip_reason": "",
+            "failed_info": "",
+            "load_error": error,
+            "start_time": "",
+            "end_time": "",
+            "records": [],
+        }
+        return test_info
+
+    def get_default_test_info(self, test_case, run_status):
         test_info = {
             "description": test_case.test_doc,
             "owner": test_case.owner,
             "priority": test_case.priority,
             "status": test_case.status,
+            "run_status": run_status,
             "timeout": test_case.timeout,
+            "skip_reason": "",
             "failed_info": "",
-            "start_time": test_result_data["start_time"],
-            "end_time": test_result_data["end_time"],
+            "load_error": "",
+            "start_time": "",
+            "end_time": "",
             "records": [],
         }
         return test_info
+
+    def begin_testcase(self, testcase):
+        super().begin_testcase(testcase)
+        self._tests[testcase.test_name]["run_status"] = TestcaseRunStatus.Running
 
     def log_test_result(self, testcase, testresult):
         """记录一个测试结果
@@ -862,17 +895,21 @@ class JSONTestReportBase(TestReportBase):
         self._testcase_total_run += 1
 
         test_name = testcase.test_name
-        if test_name in self._failed_tests:
-            test_info = self._failed_tests.pop(test_name)
+        if test_name in self._tests:
+            test_info = self._tests[test_name]
         else:
-            test_info = self.get_default_test_info(testcase, testresult)
+            test_info = self.get_default_test_info(testcase, TestcaseRunStatus.Passed)
+            self._tests[test_name] = test_info
+
         test_info["records"].append(testresult.get_file())
+        test_info["start_time"] = testresult.get_data()["start_time"]
+        test_info["end_time"] = testresult.get_data()["end_time"]
 
         if testresult.passed:
-            self._passed_tests[test_name] = test_info
+            test_info["run_status"] = TestcaseRunStatus.Passed
         else:
+            test_info["run_status"] = TestcaseRunStatus.RunFailure
             test_info["failed_info"] = testresult.get_data()["failed_info"]
-            self._failed_tests[test_name] = test_info
 
     def log_record(self, level, tag, msg, record):
         """增加一个记录
@@ -889,6 +926,11 @@ class JSONTestReportBase(TestReportBase):
             {"level": level, "tag": tag, "message": msg, "record": record}
         )
 
+    def log_loaded_tests(self, loader, testcases):
+        for testcase in testcases:
+            test_info = self.get_default_test_info(testcase, TestcaseRunStatus.Pending)
+            self._tests[testcase.test_name] = test_info
+
     def log_filtered_test(self, loader, testcase, reason):
         """记录一个被过滤的测试用例
         :param loader: 用例加载器
@@ -898,7 +940,13 @@ class JSONTestReportBase(TestReportBase):
         :param reason: 过滤原因
         :type reason: str
         """
-        self._filtered_tests.append({"name": testcase.test_name, "reason": reason})
+        if testcase.test_name in self._tests:
+            test_info = self._tests[testcase.test_name]
+        else:
+            test_info = self.get_default_test_info(testcase,TestcaseRunStatus.Skipped)
+            self._tests[testcase.test_name] = test_info
+        test_info["run_status"] = TestcaseRunStatus.Skipped
+        test_info["skip_reason"] = reason
 
     def log_load_error(self, loader, name, error):
         """记录一个加载失败的用例或用例集
@@ -909,8 +957,13 @@ class JSONTestReportBase(TestReportBase):
         :param error: 错误信息
         :type error: str
         """
-        self._load_errors.append({"name": name, "error": error})
-
+        if name in self._tests:
+            test_info = self._tests[name]
+        else:
+            test_info = self.get_load_error_test_info(error)
+            self._tests[name] = test_info
+        test_info["run_status"] = TestcaseRunStatus.LoadFailure
+        test_info["error"] = error
 
 class JSONTestReport(JSONTestReportBase):
     """JSON格式的测试报告"""
@@ -975,8 +1028,7 @@ class HtmlTestReport(JSONTestReportBase):
         """
         return HtmlTestResultFactory()
 
-    def end_report(self):
-        super(HtmlTestReport, self).end_report()
+    def flush_files(self):
         data = json.dumps(self._data)
         content = "var qta_report_data = %s" % data
         with codecs_open("qta-report.js", "w", encoding="utf-8") as fd:
@@ -984,6 +1036,30 @@ class HtmlTestReport(JSONTestReportBase):
 
         qta_report_html = get_inner_resource("qta_statics", "qta-report.html")
         shutil.copy(qta_report_html, os.getcwd())
+
+    def begin_report(self):
+        super().begin_report()
+        self.flush_files()
+
+    def begin_testcase(self, testcase):
+        super().begin_testcase(testcase)
+        self.flush_files()
+
+    def log_loaded_tests(self, loader, testcases):
+        super().log_loaded_tests(loader, testcases)
+        self.flush_files()
+
+    def log_filtered_test(self, loader, testcase, reason):
+        super().log_loaded_tests(loader, testcase)
+        self.flush_files()
+
+    def log_load_error(self, loader, name, error):
+        super().log_load_error(loader, name, error)
+        self.flush_files()
+
+    def end_report(self):
+        super(HtmlTestReport, self).end_report()
+        self.flush_files()
 
     @classmethod
     def get_parser(cls):
